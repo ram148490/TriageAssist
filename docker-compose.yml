@@ -1,0 +1,15 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: triageassist
+      POSTGRES_PASSWORD: triageassist
+      POSTGRES_DB: triageassist
+    ports:
+      - "5432:5432"
+    volumes:
+      - triageassist_pgdata:/var/lib/postgresql/data
+
+volumes:
+  triageassist_pgdata:
