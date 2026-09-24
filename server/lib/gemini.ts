@@ -10,4 +10,4 @@ export const getGeminiClient = (): GoogleGenAI | null => {
 };
 
 /** Model used for every server-side classification call. */
-export const GEMINI_MODEL = 'gemini-3.7-flash';
+export const GEMINI_MODEL = 'gemini-3.6-flash';
