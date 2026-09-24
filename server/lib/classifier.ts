@@ -32,10 +32,16 @@ const RESPONSE_SCHEMA = {
  * request failure, or a malformed response). Confidence is pinned to 0 so this
  * always triggers mandatory human review — the app never silently auto-routes
  * a patient it failed to classify.
+ *
+ * urgencyLevel is pinned to "high", not a middle-ground guess: the queue is
+ * sorted by urgency, so a lower default would let an unclassifiable case sort
+ * behind cases the system actually did classify, defeating the point of
+ * flagging it. Pinning to "high" guarantees it surfaces first for review
+ * regardless of what a "reasonable" default urgency might otherwise look like.
  */
 function unavailableFallback(): ClassificationResult {
   return {
-    urgencyLevel: 'medium',
+    urgencyLevel: 'high',
     suggestedDepartment: 'General Urgent Care',
     confidenceScore: 0,
     modelName: 'unavailable-fallback',

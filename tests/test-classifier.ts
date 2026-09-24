@@ -14,6 +14,10 @@ const result = await classifySymptoms('patient reports a headache');
 assert.strictEqual(result.confidenceScore, 0);
 assert.strictEqual(isReviewRequired(result.confidenceScore, 0.7), true);
 assert.strictEqual(result.promptVersion, PROMPT_VERSION);
-assert.ok(['high', 'medium', 'low'].includes(result.urgencyLevel));
+
+// The fallback must default to "high", not a middle-ground guess: the queue
+// sorts by urgency, so anything less than "high" here would let an
+// unclassifiable case sort behind cases the system actually did classify.
+assert.strictEqual(result.urgencyLevel, 'high');
 
 console.log('test-classifier: all assertions passed.');
