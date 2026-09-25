@@ -2,21 +2,23 @@ import { Router } from 'express';
 import { pool } from '../db';
 import { classifySymptoms } from '../lib/classifier';
 import { mapSubmission } from '../lib/mappers';
-import { isReviewRequired } from '../../shared/logic';
+import { isReviewRequired, parseConfidenceThreshold } from '../../shared/logic';
+import { asyncHandler, trimmedString } from '../lib/http';
 import type { CreateIntakeRequest } from '../../shared/types';
 
 const router = Router();
 
-const CONFIDENCE_THRESHOLD = Number(process.env.CONFIDENCE_THRESHOLD ?? 0.7);
+// Throws at startup on an invalid value, so a typo can't silently disable mandatory review.
+const CONFIDENCE_THRESHOLD = parseConfidenceThreshold(process.env.CONFIDENCE_THRESHOLD);
 
 // POST /api/intake — front-desk symptom intake. Classifies the submission with
 // AI, then persists ONLY the classification outcome. The raw symptomText from
 // the request body is never written to the database or logged.
-router.post('/intake', async (req, res) => {
+router.post('/intake', asyncHandler(async (req, res) => {
   const body = req.body as Partial<CreateIntakeRequest>;
-  const patientName = body.patientName?.trim();
-  const symptomText = body.symptomText?.trim();
-  const contactPhone = body.contactPhone?.trim() || null;
+  const patientName = trimmedString(body.patientName);
+  const symptomText = trimmedString(body.symptomText);
+  const contactPhone = trimmedString(body.contactPhone) || null;
 
   if (!patientName) {
     return res.status(400).json({ success: false, error: 'patientName is required.' });
@@ -77,6 +79,6 @@ router.post('/intake', async (req, res) => {
     console.error('Error in POST /api/intake:', error);
     return res.status(500).json({ success: false, error: 'Failed to process intake submission.' });
   }
-});
+}));
 
 export default router;

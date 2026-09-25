@@ -114,7 +114,7 @@ Open http://localhost:3000. Submit an intake on the "New Intake" tab, then switc
 | --- | --- | --- |
 | `DATABASE_URL` | PostgreSQL connection string | — (required) |
 | `GEMINI_API_KEY` | Gemini API key for classification | — (falls back to mandatory-review-everything if unset) |
-| `CONFIDENCE_THRESHOLD` | Confidence below this (0–1) forces mandatory human review | `0.7` |
+| `CONFIDENCE_THRESHOLD` | Confidence below this (0–1) forces mandatory human review. The server refuses to start if it isn't a number between 0 and 1. | `0.7` |
 | `PORT` | Local server port | `3000` |
 
 ## npm scripts
@@ -127,24 +127,39 @@ Open http://localhost:3000. Submit an intake on the "New Intake" tab, then switc
 | `npm start` | Run the production build |
 | `npm run lint` | Type-check the whole project |
 | `npm test` | Run the dependency-free unit tests (classification fallback safety, review-threshold logic) |
+| `npm run test:api` | API edge-case suite against a **running** server + Postgres (see Testing notes) |
 
 ## Testing notes
 
 `npm test` covers the pure logic that doesn't require a live database: the confidence
-threshold decision and the fail-safe classifier fallback. It does **not** exercise the
-Express routes or Postgres integration end-to-end — that requires a running Postgres
-instance (`docker compose up -d && npm run migrate`) and manual/UI testing against
-`npm run dev`, since this environment doesn't have Docker or Postgres installed to run that
-here. Before relying on this in a real clinic workflow, also run it through the actual UI
-with realistic (synthetic) intake text, including deliberately vague ones, to confirm they
-land in mandatory review.
+threshold decision (including NaN fail-safe and threshold parsing) and the fail-safe
+classifier fallback. It does **not** exercise the Express routes or Postgres.
+
+`npm run test:api` does. It runs ~55 edge-case checks against a running server
+(`docker compose up -d && npm run migrate && npm run dev`, then in another terminal
+`npm run test:api`): input validation, malformed IDs, oversized/invalid JSON, the
+confirm/override state rules, audit-trail chaining, concurrent overrides, and that the
+raw symptom text is never returned. Flags: `--strict` (treat suspected-bug "GAP" results
+as failures), `--include-crash` (also send wrong-typed fields; a regression check for
+inputs that used to crash the server). Set `BASE_URL` to target a non-default port.
+
+**It writes to the database.** Test rows are named `EDGE-TEST …`; remove them with
+`DELETE FROM intake_submissions WHERE patient_name LIKE 'EDGE-TEST%';`. Don't run it against real
+data. The fail-safe check only runs when `GEMINI_API_KEY` is unset (otherwise classification
+isn't deterministic) and reports SKIP.
+
+The React UI is not covered by automated tests. Before relying on this in a real clinic
+workflow, run it through the actual UI with realistic (synthetic) intake text, including
+deliberately vague ones, to confirm they land in mandatory review.
 
 ## API reference
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `POST` | `/api/intake` | Submit a new symptom intake; classifies and stores the outcome only |
+| `POST` | `/api/intake` | Submit a new symptom intake; classifies and stores the outcome only. `400` on missing/non-string fields |
 | `GET` | `/api/queue` | List all submissions, sorted by urgency |
-| `GET` | `/api/queue/:id` | One submission + its classification history + override log |
-| `POST` | `/api/queue/:id/confirm` | Staff confirms the AI classification as-is |
-| `POST` | `/api/queue/:id/override` | Staff overrides urgency/department; reason required, logged |
+| `GET` | `/api/queue/:id` | One submission + its classification history + override log. `404` for an unknown or malformed id |
+| `POST` | `/api/queue/:id/confirm` | Staff confirms the AI classification as-is. Only `pending` submissions: `409` if already confirmed or overridden |
+| `POST` | `/api/queue/:id/override` | Staff overrides urgency/department; reason required, logged. `400` if nothing would change |
+
+All errors are JSON: `{ "success": false, "error": "…" }` (including `400` for invalid JSON and `413` for bodies over 1 MB).

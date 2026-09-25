@@ -6,6 +6,7 @@ import path from 'path';
 import { ensureSchema } from './db';
 import intakeRoutes from './routes/intake.routes';
 import queueRoutes from './routes/queue.routes';
+import { jsonErrorHandler } from './lib/http';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -18,6 +19,7 @@ app.get('/api/health', (_req, res) => {
 
 app.use('/api', intakeRoutes);
 app.use('/api', queueRoutes);
+app.use('/api', jsonErrorHandler);
 
 const isProduction = process.env.NODE_ENV === 'production';
 

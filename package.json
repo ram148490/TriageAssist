@@ -14,7 +14,8 @@
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
     "migrate": "tsx server/migrate.ts",
-    "test": "tsx tests/test-logic.ts && tsx tests/test-classifier.ts"
+    "test": "tsx tests/test-logic.ts && tsx tests/test-classifier.ts",
+    "test:api": "tsx tests/test-api-edge.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

@@ -1,9 +1,19 @@
 import { Router } from 'express';
 import { pool } from '../db';
+import { asyncHandler, isUuid, trimmedString } from '../lib/http';
 import { mapClassificationHistory, mapOverrideLog, mapSubmission } from '../lib/mappers';
 import { DEPARTMENTS, URGENCY_LEVELS, type OverrideRequest } from '../../shared/types';
 
 const router = Router();
+
+// A malformed id can never match a row, so answer 404 up front instead of letting
+// Postgres reject it ("invalid input syntax for type uuid") and surface as a 500.
+router.param('id', (_req, res, next, id) => {
+  if (!isUuid(id)) {
+    return res.status(404).json({ success: false, error: 'Submission not found.' });
+  }
+  next();
+});
 
 // GET /api/queue — all submissions, sorted by urgency (high first), then
 // oldest-first within the same urgency level so nobody gets skipped.
@@ -51,8 +61,11 @@ router.get('/queue/:id', async (req, res) => {
 
 // POST /api/queue/:id/confirm — staff confirms the AI classification is correct
 // as-is. Satisfies the mandatory human-review requirement without changing anything.
-router.post('/queue/:id/confirm', async (req, res) => {
-  const confirmedBy = (req.body?.confirmedBy as string | undefined)?.trim();
+// Only a `pending` submission can be confirmed: the reviewer recorded on an
+// already-reviewed row is never silently replaced, and an overridden row can't
+// be flipped back to "reviewed".
+router.post('/queue/:id/confirm', asyncHandler(async (req, res) => {
+  const confirmedBy = trimmedString(req.body?.confirmedBy);
   if (!confirmedBy) {
     return res.status(400).json({ success: false, error: 'confirmedBy is required.' });
   }
@@ -61,28 +74,37 @@ router.post('/queue/:id/confirm', async (req, res) => {
     const result = await pool.query(
       `UPDATE intake_submissions
        SET review_status = 'reviewed', reviewed_by = $2, reviewed_at = now(), updated_at = now()
-       WHERE id = $1
+       WHERE id = $1 AND review_status = 'pending'
        RETURNING *`,
       [req.params.id, confirmedBy],
     );
-    if (result.rows.length === 0) {
+    if (result.rows.length > 0) {
+      return res.json({ success: true, submission: mapSubmission(result.rows[0]) });
+    }
+
+    // Nothing updated: either the id doesn't exist, or it has already been reviewed.
+    const existing = await pool.query('SELECT review_status FROM intake_submissions WHERE id = $1', [req.params.id]);
+    if (existing.rows.length === 0) {
       return res.status(404).json({ success: false, error: 'Submission not found.' });
     }
-    return res.json({ success: true, submission: mapSubmission(result.rows[0]) });
+    return res.status(409).json({
+      success: false,
+      error: `This submission has already been ${existing.rows[0].review_status === 'overridden' ? 'overridden' : 'confirmed'}.`,
+    });
   } catch (error) {
     console.error('Error in POST /api/queue/:id/confirm:', error);
     return res.status(500).json({ success: false, error: 'Failed to confirm submission.' });
   }
-});
+}));
 
 // POST /api/queue/:id/override — manual override of a classification. A reason
 // is mandatory and every override is written to override_logs for audit.
-router.post('/queue/:id/override', async (req, res) => {
-  const body = req.body as Partial<OverrideRequest>;
+router.post('/queue/:id/override', asyncHandler(async (req, res) => {
+  const body = (req.body ?? {}) as Partial<OverrideRequest>;
   const newUrgencyLevel = body.newUrgencyLevel;
   const newDepartment = body.newDepartment;
-  const reason = body.reason?.trim();
-  const overriddenBy = body.overriddenBy?.trim();
+  const reason = trimmedString(body.reason);
+  const overriddenBy = trimmedString(body.overriddenBy);
 
   if (!newUrgencyLevel || !URGENCY_LEVELS.includes(newUrgencyLevel)) {
     return res.status(400).json({ success: false, error: 'A valid newUrgencyLevel is required.' });
@@ -107,6 +129,15 @@ router.post('/queue/:id/override', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Submission not found.' });
     }
     const current = currentResult.rows[0];
+
+    // An override that changes nothing would only add a misleading audit entry.
+    if (current.final_urgency_level === newUrgencyLevel && current.final_department === newDepartment) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        success: false,
+        error: 'The urgency level and department are unchanged. Use Confirm to accept the current classification.',
+      });
+    }
 
     const updateResult = await client.query(
       `UPDATE intake_submissions
@@ -133,6 +164,6 @@ router.post('/queue/:id/override', async (req, res) => {
   } finally {
     client.release();
   }
-});
+}));
 
 export default router;
