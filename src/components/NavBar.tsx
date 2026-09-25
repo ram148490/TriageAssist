@@ -1,8 +1,18 @@
-import { ClipboardList, Stethoscope } from 'lucide-react';
+import { ClipboardList, LogOut, Stethoscope } from 'lucide-react';
 
 export type View = 'intake' | 'queue';
 
-export default function NavBar({ view, onChange }: { view: View; onChange: (v: View) => void }) {
+export default function NavBar({
+  view,
+  onChange,
+  username,
+  onSignOut,
+}: {
+  view: View;
+  onChange: (v: View) => void;
+  username: string;
+  onSignOut: () => void;
+}) {
   const tabs: { id: View; label: string; Icon: typeof ClipboardList }[] = [
     { id: 'intake', label: 'New Intake', Icon: ClipboardList },
     { id: 'queue', label: 'Triage Queue', Icon: Stethoscope },
@@ -32,6 +42,18 @@ export default function NavBar({ view, onChange }: { view: View; onChange: (v: V
             </button>
           ))}
         </nav>
+        <div className="flex items-center gap-2 text-sm text-slate-600">
+          <span>
+            Signed in as <strong className="font-semibold text-slate-900">{username}</strong>
+          </span>
+          <button
+            onClick={onSignOut}
+            className="flex items-center gap-1 rounded-md border border-slate-300 px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50"
+          >
+            <LogOut className="h-3.5 w-3.5" />
+            Sign out
+          </button>
+        </div>
       </div>
     </header>
   );

@@ -14,8 +14,12 @@
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
     "migrate": "tsx server/migrate.ts",
-    "test": "tsx tests/test-logic.ts && tsx tests/test-classifier.ts",
-    "test:api": "tsx tests/test-api-edge.ts"
+    "create-user": "tsx server/create-user.ts",
+    "test": "tsx tests/test-logic.ts && tsx tests/test-classifier.ts && tsx tests/test-classifier-http.ts && tsx tests/test-security-unit.ts",
+    "test:api": "tsx tests/test-api-edge.ts",
+    "test:failsafe": "tsx tests/test-failsafe-e2e.ts",
+    "test:security": "tsx tests/test-security-e2e.ts",
+    "test:privacy": "tsx tests/test-privacy-e2e.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

@@ -1,92 +1,45 @@
 /**
- * API edge-case checks for TriageAssist. Unlike the other tests, this one needs
- * a RUNNING server + Postgres (`npm run dev`), and it WRITES rows to that database
- * (patient names are prefixed "EDGE-TEST" so they're easy to find and delete).
- * There is no delete endpoint, so don't point it at real data.
+ * API edge-case checks for TriageAssist, run against a private copy of the server that
+ * this script boots itself (default port 3102) with a throwaway staff account and
+ * Gemini disabled, so it spends no AI quota. Needs Postgres (DATABASE_URL from .env).
  *
- *   npm run test:api                          # against http://localhost:3000
- *   BASE_URL=http://localhost:4000 npm run test:api
- *   npm run test:api -- --strict              # treat GAPs as failures too
- *   npm run test:api -- --include-crash       # also send inputs that may crash the server
+ * It WRITES rows to that database (patient names are prefixed "EDGE-TEST") and removes
+ * them again at the end. There is no delete endpoint, so it uses the database directly.
  *
- * Result kinds:
- *   PASS  behaved as intended
- *   FAIL  a hard expectation was broken (exit code 1)
- *   GAP   a suspected bug / design decision: the code currently appears to behave
- *         differently from what a reviewer would want. Reported, but only fails the
- *         run with --strict.
- *   SKIP  precondition not met (e.g. no Gemini key, so classification isn't deterministic)
+ *   npm run test:api
+ *   E2E_PORT=4102 npm run test:api
  */
+import { PROMPT_VERSION } from '../server/lib/classifier';
 import { isReviewRequired, parseConfidenceThreshold } from '../shared/logic';
 import { DEPARTMENTS, type IntakeDetail, type IntakeSubmission } from '../shared/types';
+import {
+  Client,
+  createTestUser,
+  dropTestUsers,
+  expect,
+  expectEqual,
+  openPool,
+  RUN_ID,
+  startServer,
+  Suite,
+  type Reply,
+} from './helpers/harness';
 
-const BASE_URL = (process.env.BASE_URL ?? 'http://localhost:3000').replace(/\/$/, '');
-const STRICT = process.argv.includes('--strict');
-const INCLUDE_CRASH = process.argv.includes('--include-crash');
+const PORT = Number(process.env.E2E_PORT ?? 3102);
 
-const RUN_ID = Date.now().toString(36);
+const suite = new Suite();
+const check = suite.check.bind(suite);
+const section = suite.section.bind(suite);
+const skip = suite.skip.bind(suite);
+
 const MARKER = `edge-marker-${RUN_ID}`; // unique text used to prove symptom text is never echoed back
 const UNKNOWN_UUID = '00000000-0000-4000-8000-000000000000';
 
-type Kind = 'PASS' | 'FAIL' | 'GAP' | 'SKIP';
-const results: { kind: Kind; name: string; detail?: string }[] = [];
-
-class Skip extends Error {}
-const skip = (why: string): never => {
-  throw new Skip(why);
-};
-
-async function check(name: string, fn: () => Promise<void> | void, opts: { gap?: boolean } = {}) {
-  try {
-    await fn();
-    results.push({ kind: 'PASS', name });
-    console.log(`  PASS  ${name}`);
-  } catch (err) {
-    if (err instanceof Skip) {
-      results.push({ kind: 'SKIP', name, detail: err.message });
-      console.log(`  SKIP  ${name} — ${err.message}`);
-      return;
-    }
-    const detail = err instanceof Error ? err.message : String(err);
-    const kind: Kind = opts.gap ? 'GAP' : 'FAIL';
-    results.push({ kind, name, detail });
-    console.log(`  ${kind}  ${name}\n          ${detail}`);
-  }
-}
-
-function section(title: string) {
-  console.log(`\n${title}`);
-}
-
-function expect(cond: unknown, message: string): asserts cond {
-  if (!cond) throw new Error(message);
-}
-
-function expectEqual<T>(actual: T, expected: T, what: string) {
-  expect(actual === expected, `${what}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
-}
-
-interface Reply {
-  status: number;
-  text: string;
-  json: any;
-}
+let client: Client;
+let USERNAME = '';
 
 async function call(method: string, path: string, body?: unknown, raw?: string): Promise<Reply> {
-  const res = await fetch(`${BASE_URL}${path}`, {
-    method,
-    headers: { 'Content-Type': 'application/json' },
-    body: raw ?? (body === undefined ? undefined : JSON.stringify(body)),
-    signal: AbortSignal.timeout(20_000),
-  });
-  const text = await res.text();
-  let json: any = null;
-  try {
-    json = JSON.parse(text);
-  } catch {
-    // non-JSON body (e.g. an HTML error page) — leave json null
-  }
-  return { status: res.status, text, json };
+  return client.request(method, path, body, { raw });
 }
 
 async function createIntake(label: string, extra: Record<string, unknown> = {}): Promise<IntakeSubmission> {
@@ -109,22 +62,34 @@ const validOverride = (over: Record<string, unknown> = {}) => ({
   newUrgencyLevel: 'medium',
   newDepartment: 'Minor Illness',
   reason: 'Edge-test override',
-  overriddenBy: 'Edge Tester',
   ...over,
 });
 
 async function main() {
-  console.log(`TriageAssist API edge cases → ${BASE_URL}  (run ${RUN_ID}${STRICT ? ', strict' : ''})`);
-
-  // ---------------------------------------------------------------- health
-  section('Health');
+  const pool = openPool();
+  const server = await startServer(PORT, { CONFIDENCE_THRESHOLD: '0.7' });
+  let code = 1;
   try {
-    const h = await call('GET', '/api/health');
-    expectEqual(h.status, 200, 'health status');
-  } catch (err) {
-    console.error(`\nCannot reach ${BASE_URL}/api/health — is "npm run dev" running with Postgres up?\n${err}`);
-    process.exit(2);
+    console.log(`TriageAssist API edge cases → ${server.base}  (run ${RUN_ID})`);
+    const user = await createTestUser(pool, 'api');
+    USERNAME = user.username;
+    client = new Client(server.base);
+    const login = await client.login(user.username, user.password);
+    expectEqual(login.status, 200, 'test-user login status');
+
+    code = await run();
+  } finally {
+    await server.stop();
+    const removed = await pool.query("DELETE FROM intake_submissions WHERE patient_name LIKE 'EDGE-TEST%'");
+    await dropTestUsers(pool);
+    await pool.end();
+    console.log(`(cleaned up ${removed.rowCount} EDGE-TEST rows and the test account)`);
   }
+  process.exit(code);
+}
+
+async function run(): Promise<number> {
+  section('Health');
   await check('GET /api/health returns {status: "ok"}', async () => {
     const h = await call('GET', '/api/health');
     expectEqual(h.json?.status, 'ok', 'status field');
@@ -161,6 +126,11 @@ async function main() {
 
   await check('body over the 1 MB limit is rejected with 413', async () => {
     const r = await call('POST', '/api/intake', { patientName: 'EDGE-TEST big', symptomText: 'x'.repeat(1_100_000) });
+    expectEqual(r.status, 413, 'status');
+  });
+
+  await check('a body just over the 16 KB cap is rejected with 413', async () => {
+    const r = await call('POST', '/api/intake', { patientName: 'EDGE-TEST big', symptomText: 'x'.repeat(17_000) });
     expectEqual(r.status, 413, 'status');
   });
 
@@ -235,7 +205,7 @@ async function main() {
     expectEqual(d.classificationHistory.length, 1, 'classificationHistory length');
     const h = d.classificationHistory[0];
     expect(h.modelName.length > 0, 'modelName empty');
-    expectEqual(h.promptVersion, 'triage-classify-v1', 'promptVersion');
+    expectEqual(h.promptVersion, PROMPT_VERSION, 'promptVersion');
     expectEqual(h.urgencyLevel, base.urgencyLevel, 'history urgency matches submission');
     expectEqual(h.confidenceScore, base.confidenceScore, 'history confidence matches submission');
   });
@@ -305,37 +275,32 @@ async function main() {
 
   // ---------------------------------------------------------------- confirm
   section('POST /api/queue/:id/confirm');
-  await check('missing confirmedBy returns 400', async () => {
-    const s = await createIntake('confirm-missing');
-    const r = await call('POST', `/api/queue/${s.id}/confirm`, {});
-    expectEqual(r.status, 400, 'status');
-  });
-
-  await check('whitespace-only confirmedBy returns 400', async () => {
-    const s = await createIntake('confirm-blank');
-    const r = await call('POST', `/api/queue/${s.id}/confirm`, { confirmedBy: '   ' });
-    expectEqual(r.status, 400, 'status');
+  await check('a reviewer name in the body is ignored: the signed-in user is recorded', async () => {
+    const s = await createIntake('confirm-forged-name');
+    const r = await call('POST', `/api/queue/${s.id}/confirm`, { confirmedBy: 'Dr. Forged' });
+    expectEqual(r.status, 200, 'status');
+    expectEqual(r.json.submission.reviewedBy, USERNAME, 'reviewedBy');
   });
 
   await check('unknown (valid) UUID returns 404', async () => {
-    const r = await call('POST', `/api/queue/${UNKNOWN_UUID}/confirm`, { confirmedBy: 'Edge Tester' });
+    const r = await call('POST', `/api/queue/${UNKNOWN_UUID}/confirm`, {});
     expectEqual(r.status, 404, 'status');
   });
 
   await check('malformed id returns 404, not 500', async () => {
-    const r = await call('POST', '/api/queue/not-a-uuid/confirm', { confirmedBy: 'Edge Tester' });
+    const r = await call('POST', '/api/queue/not-a-uuid/confirm', {});
     expectEqual(r.status, 404, 'status');
   });
 
   let confirmed: IntakeSubmission | undefined;
   await check('valid confirm sets reviewed status and reviewer without changing the classification', async () => {
     const s = await createIntake('confirm-ok');
-    const r = await call('POST', `/api/queue/${s.id}/confirm`, { confirmedBy: '  Nurse A  ' });
+    const r = await call('POST', `/api/queue/${s.id}/confirm`, {});
     expectEqual(r.status, 200, 'status');
     const c: IntakeSubmission = r.json.submission;
     confirmed = c;
     expectEqual(c.reviewStatus, 'reviewed', 'reviewStatus');
-    expectEqual(c.reviewedBy, 'Nurse A', 'reviewedBy is trimmed');
+    expectEqual(c.reviewedBy, USERNAME, 'reviewedBy is the signed-in user');
     expect(c.reviewedAt !== null, 'reviewedAt not set');
     expectEqual(c.finalUrgencyLevel, s.finalUrgencyLevel, 'final urgency unchanged');
     expectEqual(c.finalDepartment, s.finalDepartment, 'final department unchanged');
@@ -345,22 +310,22 @@ async function main() {
 
   await check('re-confirming an already-reviewed row does not overwrite the original reviewer', async () => {
     expect(confirmed, 'no confirmed submission');
-    const r = await call('POST', `/api/queue/${confirmed.id}/confirm`, { confirmedBy: 'Nurse B' });
+    const r = await call('POST', `/api/queue/${confirmed.id}/confirm`, { confirmedBy: 'Someone Else' });
     expectEqual(r.status, 409, 'status');
     expect(typeof r.json?.error === 'string', 'error message present');
     const after = (await detailOf(confirmed.id)).submission;
-    expectEqual(after.reviewedBy, 'Nurse A', 'reviewedBy after 2nd confirm');
+    expectEqual(after.reviewedBy, USERNAME, 'reviewedBy after 2nd confirm');
   });
 
   await check('confirming an overridden row does not flip it back to "reviewed"', async () => {
     const s = await createIntake('confirm-after-override');
     const o = await call('POST', `/api/queue/${s.id}/override`, validOverride());
     expectEqual(o.status, 200, 'setup override status');
-    const c = await call('POST', `/api/queue/${s.id}/confirm`, { confirmedBy: 'Nurse C' });
+    const c = await call('POST', `/api/queue/${s.id}/confirm`, {});
     expectEqual(c.status, 409, 'status');
     const after = (await detailOf(s.id)).submission;
     expectEqual(after.reviewStatus, 'overridden', 'reviewStatus');
-    expectEqual(after.reviewedBy, 'Edge Tester', 'reviewedBy');
+    expectEqual(after.reviewedBy, USERNAME, 'reviewedBy');
   });
 
   // ---------------------------------------------------------------- override validation
@@ -375,8 +340,10 @@ async function main() {
     ['unknown newDepartment', { newDepartment: 'Cardiology' }],
     ['missing reason', { reason: undefined }],
     ['whitespace-only reason', { reason: '   \n ' }],
-    ['missing overriddenBy', { overriddenBy: undefined }],
-    ['whitespace-only overriddenBy', { overriddenBy: '  ' }],
+    ['reason over the length limit', { reason: 'x'.repeat(1001) }],
+    ['reason with control characters', { reason: 'bad\u0000reason' }],
+    ['numeric newUrgencyLevel', { newUrgencyLevel: 1 }],
+    ['object newDepartment', { newDepartment: { a: 1 } }],
   ];
   for (const [label, patch] of badOverrides) {
     await check(`rejects ${label} with 400 and writes no audit row`, async () => {
@@ -407,12 +374,12 @@ async function main() {
       newUrgencyLevel: 'high',
       newDepartment: 'Refer to Emergency Room',
       reason: '  Vitals worse than intake text  ',
-      overriddenBy: '  Dr. Edge  ',
+      overriddenBy: 'Dr. Forged', // must be ignored
     }));
     expectEqual(r.status, 200, 'status');
     const o: IntakeSubmission = r.json.submission;
     expectEqual(o.reviewStatus, 'overridden', 'reviewStatus');
-    expectEqual(o.reviewedBy, 'Dr. Edge', 'reviewedBy');
+    expectEqual(o.reviewedBy, USERNAME, 'reviewedBy is the signed-in user, not the name in the body');
     expectEqual(o.finalUrgencyLevel, 'high', 'finalUrgencyLevel');
     expectEqual(o.finalDepartment, 'Refer to Emergency Room', 'finalDepartment');
     // The original AI suggestion must be preserved for the audit trail.
@@ -428,7 +395,7 @@ async function main() {
     expectEqual(log.newUrgencyLevel, 'high', 'log new urgency');
     expectEqual(log.newDepartment, 'Refer to Emergency Room', 'log new department');
     expectEqual(log.reason, 'Vitals worse than intake text', 'log reason is trimmed');
-    expectEqual(log.overriddenBy, 'Dr. Edge', 'log overriddenBy is trimmed');
+    expectEqual(log.overriddenBy, USERNAME, 'audit log records the signed-in user, not the name in the body');
     expect(!!log.overriddenAt, 'log has no timestamp');
   });
 
@@ -455,7 +422,7 @@ async function main() {
 
   await check('unicode, emoji, quotes and long reasons are stored intact', async () => {
     const s = await createIntake('override-unicode');
-    const reason = `Pacientе dice "dolor" 胸痛 ✓ 🚑 ' OR 1=1 -- ${'x'.repeat(5000)}`;
+    const reason = `Pacientе dice "dolor" 胸痛 ✓ 🚑 ' OR 1=1 -- ${'x'.repeat(800)}`;
     const r = await call('POST', `/api/queue/${s.id}/override`, validOverride({ reason }));
     expectEqual(r.status, 200, 'status');
     expectEqual((await detailOf(s.id)).overrideLogs[0].reason, reason, 'stored reason');
@@ -505,10 +472,7 @@ async function main() {
   // ---------------------------------------------------------------- config
   section('Configuration');
   await check('an invalid CONFIDENCE_THRESHOLD (NaN) still forces review of low-confidence cases', () => {
-    // intake.routes.ts does Number(process.env.CONFIDENCE_THRESHOLD ?? 0.7); a typo like "abc"
-    // becomes NaN, and `confidence < NaN` is always false, so NOTHING would be flagged for review.
-    const threshold = Number('abc');
-    expectEqual(isReviewRequired(0, threshold), true, 'isReviewRequired(0, NaN)');
+    expectEqual(isReviewRequired(0, Number('abc')), true, 'isReviewRequired(0, NaN)');
   });
 
   await check('CONFIDENCE_THRESHOLD parsing: default, valid values, and rejection of junk', () => {
@@ -526,49 +490,30 @@ async function main() {
     }
   });
 
-  // ---------------------------------------------------------------- crash-prone inputs
-  section('Wrong-typed JSON fields (regression: used to crash the server — needs --include-crash)');
-  if (!INCLUDE_CRASH) {
-    console.log('  SKIP  not run. Non-string fields hit .trim() outside the try/catch in an async Express 4 handler;');
-    console.log('        pass --include-crash to test whether one bad request can take the whole server down.');
-    results.push({ kind: 'SKIP', name: 'wrong-typed JSON fields', detail: 'needs --include-crash' });
-  } else {
-    const wrongTypes: [string, string, unknown, (s: IntakeSubmission) => string][] = [
-      ['intake with numeric patientName', '/api/intake', { patientName: 123, symptomText: 'cough for a week' }, () => '/api/intake'],
-      ['intake with object symptomText', '/api/intake', { patientName: 'EDGE-TEST x', symptomText: { a: 1 } }, () => '/api/intake'],
-      ['confirm with numeric confirmedBy', '', { confirmedBy: 123 }, (s) => `/api/queue/${s.id}/confirm`],
-      ['override with numeric reason', '', validOverride({ reason: 123 }), (s) => `/api/queue/${s.id}/override`],
-    ];
-    const victim = await createIntake('wrong-types');
-    for (const [label, fixedPath, body, pathFor] of wrongTypes) {
-      await check(`${label} returns 400 and the server stays up`, async () => {
-        const path = fixedPath || pathFor(victim);
-        let status = 0;
-        try {
-          status = (await call('POST', path, body)).status;
-        } catch (err) {
-          // Connection reset / timeout: the request died without a response.
-          throw new Error(`no response (${err instanceof Error ? err.message : err}) — server may have crashed`);
-        }
-        const alive = await call('GET', '/api/health').then((h) => h.status === 200, () => false);
-        expect(alive, `server is DOWN after this request (status was ${status}) — restart "npm run dev"`);
-        expectEqual(status, 400, 'status');
-      });
-    }
+  // ---------------------------------------------------------------- wrong-typed fields
+  section('Wrong-typed JSON fields (regression: these used to crash the server)');
+  const wrongTypes: [string, (s: IntakeSubmission) => [string, unknown]][] = [
+    ['intake with numeric patientName', () => ['/api/intake', { patientName: 123, symptomText: 'cough for a week' }]],
+    ['intake with object symptomText', () => ['/api/intake', { patientName: 'EDGE-TEST x', symptomText: { a: 1 } }]],
+    ['intake with array contactPhone', () => ['/api/intake', { patientName: 'EDGE-TEST x', symptomText: 'cough', contactPhone: ['1'] }]],
+    ['override with numeric reason', (s) => [`/api/queue/${s.id}/override`, validOverride({ reason: 123 })]],
+  ];
+  const victim = await createIntake('wrong-types');
+  for (const [label, build] of wrongTypes) {
+    await check(`${label} returns 400 and the server stays up`, async () => {
+      const [path, body] = build(victim);
+      const r = await call('POST', path, body);
+      expectEqual(r.status, 400, 'status');
+      const alive = await call('GET', '/api/health').then((h) => h.status === 200, () => false);
+      expect(alive, 'server is DOWN after this request');
+    });
   }
+  await check('confirm with a non-string body value is harmless (the body is ignored)', async () => {
+    const r = await call('POST', `/api/queue/${victim.id}/confirm`, { confirmedBy: 123 });
+    expectEqual(r.status, 200, 'status');
+  });
 
-  // ---------------------------------------------------------------- summary
-  const count = (k: Kind) => results.filter((r) => r.kind === k).length;
-  console.log(`\n${count('PASS')} passed, ${count('FAIL')} failed, ${count('GAP')} gaps, ${count('SKIP')} skipped`);
-  const gaps = results.filter((r) => r.kind === 'GAP');
-  if (gaps.length) {
-    console.log('\nGaps (suspected bugs / decisions to make):');
-    for (const g of gaps) console.log(`  - ${g.name}`);
-  }
-  console.log(`\nTest rows are named "EDGE-TEST … ${RUN_ID}" — delete with: DELETE FROM intake_submissions WHERE patient_name LIKE 'EDGE-TEST%';`);
-
-  const failed = count('FAIL') > 0 || (STRICT && gaps.length > 0);
-  process.exit(failed ? 1 : 0);
+  return suite.summary();
 }
 
 main().catch((err) => {

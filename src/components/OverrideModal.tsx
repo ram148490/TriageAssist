@@ -1,6 +1,7 @@
 import { X } from 'lucide-react';
 import { useState } from 'react';
 import { DEPARTMENTS, URGENCY_LEVELS, type Department, type IntakeSubmission, type UrgencyLevel } from '../../shared/types';
+import { LIMITS } from '../../shared/validation';
 
 export default function OverrideModal({
   submission,
@@ -9,25 +10,24 @@ export default function OverrideModal({
 }: {
   submission: IntakeSubmission;
   onClose: () => void;
-  onSubmit: (payload: { newUrgencyLevel: UrgencyLevel; newDepartment: Department; reason: string; overriddenBy: string }) => Promise<void>;
+  onSubmit: (payload: { newUrgencyLevel: UrgencyLevel; newDepartment: Department; reason: string }) => Promise<void>;
 }) {
   const [newUrgencyLevel, setNewUrgencyLevel] = useState<UrgencyLevel>(submission.finalUrgencyLevel);
   const [newDepartment, setNewDepartment] = useState<Department>(submission.finalDepartment);
   const [reason, setReason] = useState('');
-  const [overriddenBy, setOverriddenBy] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!reason.trim() || !overriddenBy.trim()) {
-      setError('A reason and your name are both required.');
+    if (!reason.trim()) {
+      setError('A reason is required.');
       return;
     }
     setSubmitting(true);
     setError(null);
     try {
-      await onSubmit({ newUrgencyLevel, newDepartment, reason: reason.trim(), overriddenBy: overriddenBy.trim() });
+      await onSubmit({ newUrgencyLevel, newDepartment, reason: reason.trim() });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save override.');
     } finally {
@@ -81,6 +81,9 @@ export default function OverrideModal({
             <textarea
               required
               rows={3}
+              maxLength={LIMITS.reason}
+              autoComplete="off"
+              spellCheck={false}
               value={reason}
               onChange={(e) => setReason(e.target.value)}
               className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
@@ -88,16 +91,7 @@ export default function OverrideModal({
             />
           </div>
 
-          <div>
-            <label className="block text-sm font-medium text-slate-700">Your name</label>
-            <input
-              required
-              value={overriddenBy}
-              onChange={(e) => setOverriddenBy(e.target.value)}
-              className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
-              placeholder="Staff member name"
-            />
-          </div>
+          <p className="text-xs text-slate-500">This override is recorded under your signed-in account.</p>
 
           {error && <p className="text-sm text-red-600">{error}</p>}
 

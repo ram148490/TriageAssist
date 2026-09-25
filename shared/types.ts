@@ -14,6 +14,9 @@ export type Department = (typeof DEPARTMENTS)[number];
 export const REVIEW_STATUSES = ['pending', 'reviewed', 'overridden'] as const;
 export type ReviewStatus = (typeof REVIEW_STATUSES)[number];
 
+/** modelName recorded in classification_history when the fail-safe result replaced the AI. */
+export const FALLBACK_MODEL_NAME = 'unavailable-fallback';
+
 export interface ClassificationResult {
   urgencyLevel: UrgencyLevel;
   suggestedDepartment: Department;
@@ -75,9 +78,14 @@ export interface CreateIntakeRequest {
   symptomText: string;
 }
 
+// Who performed an override/confirm is taken from the authenticated session on the
+// server, never from the request body, so the audit trail can't be forged.
 export interface OverrideRequest {
   newUrgencyLevel: UrgencyLevel;
   newDepartment: Department;
   reason: string;
-  overriddenBy: string;
+}
+
+export interface StaffUser {
+  username: string;
 }

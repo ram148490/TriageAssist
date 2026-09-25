@@ -1,8 +1,10 @@
 import { Router } from 'express';
 import { pool } from '../db';
-import { asyncHandler, isUuid, trimmedString } from '../lib/http';
+import { asyncHandler, isUuid } from '../lib/http';
+import { logError } from '../lib/log';
 import { mapClassificationHistory, mapOverrideLog, mapSubmission } from '../lib/mappers';
 import { DEPARTMENTS, URGENCY_LEVELS, type OverrideRequest } from '../../shared/types';
+import { validateReason } from '../../shared/validation';
 
 const router = Router();
 
@@ -27,7 +29,7 @@ router.get('/queue', async (_req, res) => {
     );
     return res.json({ success: true, submissions: result.rows.map(mapSubmission) });
   } catch (error) {
-    console.error('Error in GET /api/queue:', error);
+    logError('Error in GET /api/queue', error);
     return res.status(500).json({ success: false, error: 'Failed to load the triage queue.' });
   }
 });
@@ -54,7 +56,7 @@ router.get('/queue/:id', async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Error in GET /api/queue/:id:', error);
+    logError('Error in GET /api/queue/:id', error);
     return res.status(500).json({ success: false, error: 'Failed to load submission.' });
   }
 });
@@ -63,12 +65,10 @@ router.get('/queue/:id', async (req, res) => {
 // as-is. Satisfies the mandatory human-review requirement without changing anything.
 // Only a `pending` submission can be confirmed: the reviewer recorded on an
 // already-reviewed row is never silently replaced, and an overridden row can't
-// be flipped back to "reviewed".
+// be flipped back to "reviewed". The reviewer is the signed-in user; any name in
+// the request body is ignored so the audit trail can't be forged.
 router.post('/queue/:id/confirm', asyncHandler(async (req, res) => {
-  const confirmedBy = trimmedString(req.body?.confirmedBy);
-  if (!confirmedBy) {
-    return res.status(400).json({ success: false, error: 'confirmedBy is required.' });
-  }
+  const confirmedBy = req.user!.username;
 
   try {
     const result = await pool.query(
@@ -92,7 +92,7 @@ router.post('/queue/:id/confirm', asyncHandler(async (req, res) => {
       error: `This submission has already been ${existing.rows[0].review_status === 'overridden' ? 'overridden' : 'confirmed'}.`,
     });
   } catch (error) {
-    console.error('Error in POST /api/queue/:id/confirm:', error);
+    logError('Error in POST /api/queue/:id/confirm', error);
     return res.status(500).json({ success: false, error: 'Failed to confirm submission.' });
   }
 }));
@@ -103,8 +103,8 @@ router.post('/queue/:id/override', asyncHandler(async (req, res) => {
   const body = (req.body ?? {}) as Partial<OverrideRequest>;
   const newUrgencyLevel = body.newUrgencyLevel;
   const newDepartment = body.newDepartment;
-  const reason = trimmedString(body.reason);
-  const overriddenBy = trimmedString(body.overriddenBy);
+  // Recorded in the audit log: the signed-in user, never a name supplied in the request.
+  const overriddenBy = req.user!.username;
 
   if (!newUrgencyLevel || !URGENCY_LEVELS.includes(newUrgencyLevel)) {
     return res.status(400).json({ success: false, error: 'A valid newUrgencyLevel is required.' });
@@ -112,12 +112,11 @@ router.post('/queue/:id/override', asyncHandler(async (req, res) => {
   if (!newDepartment || !DEPARTMENTS.includes(newDepartment)) {
     return res.status(400).json({ success: false, error: 'A valid newDepartment is required.' });
   }
-  if (!reason) {
-    return res.status(400).json({ success: false, error: 'A reason is required to override a classification.' });
+  const reasonResult = validateReason(body.reason);
+  if (!reasonResult.ok) {
+    return res.status(400).json({ success: false, error: reasonResult.error });
   }
-  if (!overriddenBy) {
-    return res.status(400).json({ success: false, error: 'overriddenBy is required.' });
-  }
+  const reason = reasonResult.value;
 
   const client = await pool.connect();
   try {
@@ -159,7 +158,7 @@ router.post('/queue/:id/override', asyncHandler(async (req, res) => {
     return res.json({ success: true, submission: mapSubmission(updateResult.rows[0]) });
   } catch (error) {
     await client.query('ROLLBACK');
-    console.error('Error in POST /api/queue/:id/override:', error);
+    logError('Error in POST /api/queue/:id/override', error);
     return res.status(500).json({ success: false, error: 'Failed to override classification.' });
   } finally {
     client.release();

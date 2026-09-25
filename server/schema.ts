@@ -60,4 +60,15 @@ CREATE TABLE IF NOT EXISTS override_logs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_override_intake ON override_logs (intake_id);
+
+-- Staff accounts. Passwords are stored only as scrypt hashes (see server/lib/auth.ts).
+-- Create accounts with: npm run create-user -- <username>
+CREATE TABLE IF NOT EXISTS staff_users (
+  id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  username              TEXT NOT NULL UNIQUE CHECK (username = lower(username) AND length(username) BETWEEN 3 AND 32),
+  password_hash         TEXT NOT NULL,
+  disabled              BOOLEAN NOT NULL DEFAULT false,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  password_changed_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 `;

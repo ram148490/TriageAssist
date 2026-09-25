@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { submitIntake } from '../api';
 import UrgencyBadge from '../components/UrgencyBadge';
 import type { IntakeSubmission } from '../../shared/types';
+import { LIMITS } from '../../shared/validation';
 
 export default function IntakeForm({ onSubmitted }: { onSubmitted: () => void }) {
   const [patientName, setPatientName] = useState('');
@@ -11,14 +12,20 @@ export default function IntakeForm({ onSubmitted }: { onSubmitted: () => void })
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<IntakeSubmission | null>(null);
+  const [classificationUnavailable, setClassificationUnavailable] = useState(false);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
     setSubmitting(true);
     try {
-      const { submission } = await submitIntake({ patientName, contactPhone: contactPhone || undefined, symptomText });
+      const { submission, classificationUnavailable } = await submitIntake({
+        patientName,
+        contactPhone: contactPhone || undefined,
+        symptomText,
+      });
       setResult(submission);
+      setClassificationUnavailable(classificationUnavailable);
       setPatientName('');
       setContactPhone('');
       setSymptomText('');
@@ -34,8 +41,9 @@ export default function IntakeForm({ onSubmitted }: { onSubmitted: () => void })
     <div className="mx-auto max-w-2xl px-4 py-8 sm:px-6">
       <h1 className="text-lg font-semibold text-slate-900">Patient Symptom Intake</h1>
       <p className="mt-1 text-sm text-slate-500">
-        Describe what the patient tells you in their own words. This is used once to suggest an urgency level and
-        department, then discarded — it is never stored.
+        Describe what the patient tells you in their own words. It is sent to an AI service once to suggest an
+        urgency level and department, and TriageAssist does not store it. Do not type the patient's name or other
+        identifying details here.
       </p>
 
       <form onSubmit={handleSubmit} className="mt-6 space-y-4 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -43,6 +51,8 @@ export default function IntakeForm({ onSubmitted }: { onSubmitted: () => void })
           <label className="block text-sm font-medium text-slate-700">Patient name</label>
           <input
             required
+            maxLength={LIMITS.patientName}
+            autoComplete="off"
             value={patientName}
             onChange={(e) => setPatientName(e.target.value)}
             className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
@@ -53,6 +63,9 @@ export default function IntakeForm({ onSubmitted }: { onSubmitted: () => void })
         <div>
           <label className="block text-sm font-medium text-slate-700">Contact phone (optional)</label>
           <input
+            maxLength={LIMITS.contactPhone}
+            inputMode="tel"
+            autoComplete="off"
             value={contactPhone}
             onChange={(e) => setContactPhone(e.target.value)}
             className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
@@ -65,6 +78,9 @@ export default function IntakeForm({ onSubmitted }: { onSubmitted: () => void })
           <textarea
             required
             minLength={3}
+            maxLength={LIMITS.symptomText}
+            autoComplete="off"
+            spellCheck={false}
             rows={5}
             value={symptomText}
             onChange={(e) => setSymptomText(e.target.value)}
@@ -95,9 +111,21 @@ export default function IntakeForm({ onSubmitted }: { onSubmitted: () => void })
             <UrgencyBadge level={result.finalUrgencyLevel} />
             <span className="text-slate-700">{result.finalDepartment}</span>
             <span className="text-slate-400">·</span>
-            <span className="text-slate-500">{Math.round(result.confidenceScore * 100)}% confidence</span>
+            <span className="text-slate-500">
+              {classificationUnavailable ? 'AI unavailable' : `${Math.round(result.confidenceScore * 100)}% confidence`}
+            </span>
           </div>
-          {result.needsHumanReview && (
+          {classificationUnavailable && (
+            <div className="mt-3 flex items-start gap-2 rounded-md bg-red-50 p-3 text-sm text-red-800 ring-1 ring-inset ring-red-600/20">
+              <ShieldAlert className="mt-0.5 h-4 w-4 flex-shrink-0" />
+              <p>
+                The AI classifier was <strong>unavailable</strong> (it failed or timed out), so this patient was set to{' '}
+                <strong>High urgency</strong> as a precaution and needs <strong>manual triage</strong>. A staff member
+                must confirm or override it from the Triage Queue.
+              </p>
+            </div>
+          )}
+          {!classificationUnavailable && result.needsHumanReview && (
             <div className="mt-3 flex items-start gap-2 rounded-md bg-amber-50 p-3 text-sm text-amber-800 ring-1 ring-inset ring-amber-600/20">
               <ShieldAlert className="mt-0.5 h-4 w-4 flex-shrink-0" />
               <p>

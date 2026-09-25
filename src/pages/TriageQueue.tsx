@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import { confirmSubmission, fetchQueue, fetchSubmissionDetail, overrideSubmission } from '../api';
 import OverrideModal from '../components/OverrideModal';
 import UrgencyBadge from '../components/UrgencyBadge';
-import type { Department, IntakeDetail, IntakeSubmission, UrgencyLevel } from '../../shared/types';
+import { FALLBACK_MODEL_NAME, type Department, type IntakeDetail, type IntakeSubmission, type UrgencyLevel } from '../../shared/types';
 
 const STATUS_LABEL: Record<IntakeSubmission['reviewStatus'], string> = {
   pending: 'Pending review',
@@ -26,7 +26,6 @@ export default function TriageQueue({ refreshKey }: { refreshKey: number }) {
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<IntakeDetail | null>(null);
-  const [confirmName, setConfirmName] = useState('');
   const [showOverride, setShowOverride] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
@@ -47,38 +46,57 @@ export default function TriageQueue({ refreshKey }: { refreshKey: number }) {
   }, [refreshKey]);
 
   useEffect(() => {
+    setActionError(null);
+    setShowOverride(false);
     if (!selectedId) {
       setDetail(null);
       return;
     }
+    // Ignore a slow response for a row the user has already clicked away from,
+    // so the sidebar can never show one patient's data under another's name.
+    let stale = false;
+    setDetail(null);
     fetchSubmissionDetail(selectedId)
-      .then(({ detail }) => setDetail(detail))
-      .catch((err) => setActionError(err instanceof Error ? err.message : 'Failed to load detail.'));
+      .then(({ detail }) => {
+        if (!stale) setDetail(detail);
+      })
+      .catch((err) => {
+        if (!stale) setActionError(err instanceof Error ? err.message : 'Failed to load detail.');
+      });
+    return () => {
+      stale = true;
+    };
   }, [selectedId]);
 
-  async function handleConfirm() {
-    if (!selectedId || !confirmName.trim()) {
-      setActionError('Enter your name to confirm.');
-      return;
-    }
-    setActionError(null);
+  /** Re-syncs the list and sidebar after a change. Never throws: the change itself already succeeded. */
+  async function refreshAfterChange(id: string) {
+    await loadQueue();
     try {
-      await confirmSubmission(selectedId, confirmName.trim());
-      await loadQueue();
-      const { detail } = await fetchSubmissionDetail(selectedId);
+      const { detail } = await fetchSubmissionDetail(id);
       setDetail(detail);
-    } catch (err) {
-      setActionError(err instanceof Error ? err.message : 'Failed to confirm.');
+    } catch {
+      setActionError('Your change was saved, but the latest details could not be loaded. Press Refresh.');
     }
   }
 
-  async function handleOverride(payload: { newUrgencyLevel: UrgencyLevel; newDepartment: Department; reason: string; overriddenBy: string }) {
+  async function handleConfirm() {
     if (!selectedId) return;
+    setActionError(null);
+    try {
+      await confirmSubmission(selectedId);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to confirm.');
+      return;
+    }
+    await refreshAfterChange(selectedId);
+  }
+
+  async function handleOverride(payload: { newUrgencyLevel: UrgencyLevel; newDepartment: Department; reason: string }) {
+    if (!selectedId) return;
+    // If this throws, the modal shows the error and stays open (nothing was saved).
     await overrideSubmission(selectedId, payload);
-    await loadQueue();
-    const { detail } = await fetchSubmissionDetail(selectedId);
-    setDetail(detail);
     setShowOverride(false);
+    await refreshAfterChange(selectedId);
   }
 
   const selected = submissions.find((s) => s.id === selectedId) ?? null;
@@ -98,6 +116,8 @@ export default function TriageQueue({ refreshKey }: { refreshKey: number }) {
         </div>
 
         {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
+        {/* the sidebar (which normally shows action errors) isn't rendered until detail loads */}
+        {selectedId && !detail && actionError && <p className="mt-3 text-sm text-red-600">{actionError}</p>}
         {loading && <p className="mt-3 text-sm text-slate-500">Loading…</p>}
 
         {!loading && submissions.length === 0 && (
@@ -153,16 +173,17 @@ export default function TriageQueue({ refreshKey }: { refreshKey: number }) {
             {selected.needsHumanReview && ' · below review threshold'}
           </p>
 
+          {detail.classificationHistory[0]?.modelName === FALLBACK_MODEL_NAME && (
+            <p className="mt-2 flex items-start gap-1 rounded-md bg-red-50 p-2 text-xs text-red-700 ring-1 ring-inset ring-red-600/20">
+              <ShieldAlert className="mt-0.5 h-3 w-3 flex-shrink-0" />
+              AI classification was unavailable for this intake — High urgency is a precaution. Triage manually.
+            </p>
+          )}
+
           {actionError && <p className="mt-2 text-xs text-red-600">{actionError}</p>}
 
           {selected.reviewStatus === 'pending' && (
             <div className="mt-4 space-y-2 border-t border-slate-100 pt-3">
-              <input
-                value={confirmName}
-                onChange={(e) => setConfirmName(e.target.value)}
-                placeholder="Your name"
-                className="w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm"
-              />
               <button
                 onClick={handleConfirm}
                 className="w-full rounded-md bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-700"

@@ -1,35 +1,40 @@
 import { Router } from 'express';
 import { pool } from '../db';
 import { classifySymptoms } from '../lib/classifier';
+import { asyncHandler } from '../lib/http';
+import { logError } from '../lib/log';
 import { mapSubmission } from '../lib/mappers';
+import { intakeLimiter } from './auth.routes';
 import { isReviewRequired, parseConfidenceThreshold } from '../../shared/logic';
-import { asyncHandler, trimmedString } from '../lib/http';
-import type { CreateIntakeRequest } from '../../shared/types';
+import { FALLBACK_MODEL_NAME } from '../../shared/types';
+import { validateIntake } from '../../shared/validation';
 
 const router = Router();
 
 // Throws at startup on an invalid value, so a typo can't silently disable mandatory review.
 const CONFIDENCE_THRESHOLD = parseConfidenceThreshold(process.env.CONFIDENCE_THRESHOLD);
 
-// POST /api/intake — front-desk symptom intake. Classifies the submission with
-// AI, then persists ONLY the classification outcome. The raw symptomText from
-// the request body is never written to the database or logged.
+// POST /api/intake — front-desk symptom intake (authenticated staff only). Classifies
+// the submission with AI, then persists ONLY the classification outcome. The raw
+// symptomText from the request body is never written to the database or logged.
 router.post('/intake', asyncHandler(async (req, res) => {
-  const body = req.body as Partial<CreateIntakeRequest>;
-  const patientName = trimmedString(body.patientName);
-  const symptomText = trimmedString(body.symptomText);
-  const contactPhone = trimmedString(body.contactPhone) || null;
+  const wait = intakeLimiter.consume(req.user!.id);
+  if (wait > 0) {
+    res.setHeader('Retry-After', String(Math.ceil(wait / 1000)));
+    return res.status(429).json({ success: false, error: 'Too many intake submissions. Please wait a moment.' });
+  }
 
-  if (!patientName) {
-    return res.status(400).json({ success: false, error: 'patientName is required.' });
+  const input = validateIntake(req.body ?? {});
+  if (!input.ok) {
+    return res.status(400).json({ success: false, error: input.error });
   }
-  if (!symptomText || symptomText.length < 3) {
-    return res.status(400).json({ success: false, error: 'symptomText is required.' });
-  }
+  const { patientName, contactPhone, symptomText } = input.value;
 
   try {
     const classification = await classifySymptoms(symptomText);
     const needsHumanReview = isReviewRequired(classification.confidenceScore, CONFIDENCE_THRESHOLD);
+    // True when the AI could not be used and the fail-safe result was substituted.
+    const classificationUnavailable = classification.modelName === FALLBACK_MODEL_NAME;
 
     const client = await pool.connect();
     try {
@@ -68,7 +73,11 @@ router.post('/intake', asyncHandler(async (req, res) => {
 
       await client.query('COMMIT');
 
-      return res.status(201).json({ success: true, submission: mapSubmission(submissionRow) });
+      return res.status(201).json({
+        success: true,
+        submission: mapSubmission(submissionRow),
+        classificationUnavailable,
+      });
     } catch (err) {
       await client.query('ROLLBACK');
       throw err;
@@ -76,7 +85,8 @@ router.post('/intake', asyncHandler(async (req, res) => {
       client.release();
     }
   } catch (error) {
-    console.error('Error in POST /api/intake:', error);
+    // logError, not the raw error: Postgres errors carry the failing row (patient name/phone).
+    logError('Error in POST /api/intake', error);
     return res.status(500).json({ success: false, error: 'Failed to process intake submission.' });
   }
 }));

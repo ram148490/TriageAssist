@@ -7,7 +7,8 @@ services:
       POSTGRES_PASSWORD: triageassist
       POSTGRES_DB: triageassist
     ports:
-      - "5432:5432"
+      # Loopback only: the database holds patient names/phone numbers and ships with a dev password.
+      - "127.0.0.1:5432:5432"
     volumes:
       - triageassist_pgdata:/var/lib/postgresql/data
 
