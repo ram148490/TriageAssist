@@ -101,8 +101,12 @@ export class SessionStore {
     return token;
   }
 
-  /** Returns the session's user and refreshes its idle timer, or null if missing/expired. */
-  get(token: string | undefined): SessionUser | null {
+  /**
+   * Returns the session's user, or null if missing/expired. Refreshes the idle timer
+   * unless `touch` is false (automatic background polling must not count as user
+   * activity, or an unattended workstation would never time out).
+   */
+  get(token: string | undefined, touch = true): SessionUser | null {
     if (!token) return null;
     const key = sha256(token);
     const record = this.sessions.get(key);
@@ -112,7 +116,7 @@ export class SessionStore {
       this.sessions.delete(key);
       return null;
     }
-    record.lastSeen = t;
+    if (touch) record.lastSeen = t;
     return record.user;
   }
 

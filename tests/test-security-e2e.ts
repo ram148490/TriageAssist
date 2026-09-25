@@ -361,6 +361,26 @@ async function main() {
       expectEqual((await p.request('GET', '/api/queue', undefined, { anonymous: true })).status, 401, 'anonymous queue in production');
     });
 
+    section('Background polling must not defeat the idle timeout (server with a 3-second idle limit)');
+    const shortIdle = await startServer(BASE_PORT + 30, { SESSION_IDLE_MINUTES: '0.05' });
+    servers.push(shortIdle);
+    await check('polls marked X-Background-Poll do not reset the idle timer; ordinary requests do', async () => {
+      const polled = new Client(shortIdle.base);
+      const busy = new Client(shortIdle.base);
+      expectEqual((await polled.login(alice.username, alice.password)).status, 200, 'login (polled)');
+      expectEqual((await busy.login(bob.username, bob.password)).status, 200, 'login (busy)');
+      const polledStatuses: number[] = [];
+      const busyStatuses: number[] = [];
+      for (let i = 0; i < 6; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
+        polledStatuses.push((await polled.request('GET', '/api/queue', undefined, { headers: { 'X-Background-Poll': '1' } })).status);
+        busyStatuses.push((await busy.request('GET', '/api/queue')).status);
+      }
+      expectEqual(polledStatuses[0], 200, `the polled session is valid at first (statuses ${polledStatuses})`);
+      expect(polledStatuses.includes(401), `a session kept "alive" only by background polls must expire (statuses ${polledStatuses})`);
+      expect(busyStatuses.every((s) => s === 200), `a session with real activity stays alive (statuses ${busyStatuses})`);
+    });
+
     // ------------------------------------------------------------------ lockout (last: it blocks this client)
     section('Brute-force protection (last, because it locks this client out for 15 minutes)');
     await check('5 wrong passwords lock the account for this client, even against the right password', async () => {

@@ -28,6 +28,50 @@ confident about is flagged for mandatory human review and is never silently auto
 - **Staff sign-in required** — every screen and every data endpoint requires a signed-in staff
   account; who confirmed or overrode a case is taken from the session, never typed in.
 
+## Accessibility
+
+Built to WCAG 2.2 AA as far as automated tooling can judge (see the limits below).
+
+- **Labels and structure.** Every form field has a real `<label>` tied to it, with hints and errors
+  attached via `aria-describedby`; pages have a single `h1`, a labelled `nav`, a `main` landmark and a
+  "Skip to main content" link; the current page is marked `aria-current`. Urgency is always text plus an
+  icon shape, never colour alone. Queue rows are a real list whose buttons have full names
+  ("High urgency, Maria Lopez, General Urgent Care, 5 min ago, Review required"), and the Confirm/Override
+  buttons are described by the patient they act on.
+- **Keyboard, end to end.** Sign-in is operable with Tab/Enter alone: focus starts in the username field,
+  a failed attempt returns focus to the (cleared) password field, and after signing in focus lands on the
+  page heading. Choosing a case moves focus to its details; Escape or Close returns it to the row. After
+  Confirm or Override removes the button that had focus, focus moves to the case instead of being lost.
+  The override dialog is a real modal: labelled, focus moves in and is trapped, Escape cancels, and focus
+  returns to the button that opened it. Buttons stay focusable while busy (`aria-disabled`, never
+  `disabled`). One visible 3px focus ring everywhere.
+- **Colour and motion.** Text meets 4.5:1 and form-field borders 3:1 (this replaced white-on-`sky-600` and
+  white-on-`emerald-600` buttons, and near-invisible field borders); spinners and transitions stop under
+  `prefers-reduced-motion`.
+- **New high-urgency cases are announced.** The queue is refreshed every 15 seconds on **every** screen (not
+  only while the queue tab is open). When a case newly becomes High urgency — arrives, or is escalated by
+  someone else's override — an assertive live region says, for example, "New high urgency case: Maria Lopez,
+  General Urgent Care." (several at once are combined), a red banner appears with **View in queue** (opens the
+  case and puts keyboard focus on its row) and **Dismiss**, the Queue tab shows a count, and the browser tab
+  title shows "(2 high)". Cases already there when the app loaded are not announced, and neither are your own
+  submissions (the form result announces those) or low/medium cases. If updates stop reaching the server, a
+  visible warning and a polite announcement say the queue may be out of date, and another says when it recovers.
+  Automatic polls are marked `X-Background-Poll` so the server does **not** count them as activity: an
+  unattended screen still signs out after the idle timeout.
+
+Limits, stated plainly:
+
+- **Latency.** A new case is noticed within one poll (15 s), not instantly. Browsers slow timers in background
+  tabs (Chrome can drop them to about once a minute), so a hidden tab can be later still — the tab-title count is
+  the fallback. The app refreshes immediately when the tab becomes visible or the network returns. A push
+  channel (server-sent events) would remove the delay; it isn't built.
+- **Not verified with real assistive technology.** The automated checks below drive the real components, but
+  jsdom has no layout engine or screen reader. Before relying on this, test with NVDA or JAWS on Windows and
+  VoiceOver on macOS/iOS, in particular that the assertive announcement is spoken without cutting off other
+  speech, and by keyboard alone in your target browser.
+- **Contrast** is computed from the Tailwind palette for colours declared on the same element; a colour
+  inherited from a differently coloured ancestor isn't seen.
+
 ## Failure handling
 
 The app is designed never to crash or hang on a failure in the path a patient's triage
@@ -224,7 +268,8 @@ Open http://localhost:3000. Submit an intake on the "New Intake" tab, then switc
 | `npm start` | Run the production build |
 | `npm run lint` | Type-check the whole project |
 | `npm run create-user -- <name>` | Create a staff account (or `--reset` / `--disable`) |
-| `npm test` | Dependency-free unit tests (classifier fail-safe, security primitives, validation, log safety) |
+| `npm test` | Dependency-free unit tests (classifier fail-safe, security primitives, validation, log safety) and the accessibility checks below |
+| `npm run test:a11y` | Accessibility only: WCAG contrast of every colour pair + axe-core and keyboard/live-region behaviour of the real UI in jsdom |
 | `npm run test:api` | API edge cases against its own server + Postgres (see Testing notes) |
 | `npm run test:security` | Authentication, sessions, lockout, CSRF, headers, rate limits (own servers; needs Postgres) |
 | `npm run test:privacy` | Proves the symptom text never reaches the DB, logs or responses on any path (own servers; needs Postgres) |
@@ -251,7 +296,7 @@ Postgres (`docker compose up -d && npm run migrate`), and they delete the rows a
 
 - `test:api` — validation, malformed IDs, oversized/invalid JSON, the confirm/override state rules,
   audit-trail chaining, concurrent overrides, and wrong-typed fields that used to crash the server.
-- `test:security` — every data endpoint returns 401 anonymously *and* anonymous calls change nothing;
+- `test:security` — background polling can't defeat the idle timeout; every data endpoint returns 401 anonymously *and* anonymous calls change nothing;
   forged cookies/headers; session cookie flags, fixation, logout replay; lockout; forged names in the
   audit trail; cross-site requests; input limits; headers and error hygiene; loopback-only binding;
   the per-user rate limit; production CSP.
@@ -259,6 +304,14 @@ Postgres (`docker compose up -d && npm run migrate`), and they delete the rows a
   Gemini failure mode (a fake API that echoes the text back in its errors), plus malformed and rejected
   requests, then searches the server logs, every API response, every column of every database table
   and Postgres's own log for it. Also checks exactly what is sent to Gemini, and the paid-tier gate.
+- `test:a11y` (also part of `npm test`; needs no database) — a static WCAG contrast check that resolves Tailwind's
+  own palette for every text/background pair, field border and placeholder in `src/`, plus behaviour tests that mount
+  the real `<App>` in jsdom against a fake API, press keys and follow focus: the sign-in flow, labels on every
+  control, axe-core (no violations) on the sign-in, intake, queue, case-details and override-dialog states, focus
+  trap and restoration, focus after Confirm/Override, and the new-high-urgency announcement (exactly once, on any
+  screen, not for your own submissions, aggregated, escalations, banner leads to the case, connection loss).
+  Mutation-checked: removing the announcement, restricting polling to the queue tab, the focus trap, a field label,
+  or the post-Confirm focus fix each makes a specific test fail.
 - `test:failsafe` — a Gemini hang / 401 / 429 / 503 / garbage still yields a 201 with High urgency,
   0% confidence, mandatory review and an "AI unavailable" flag, sorted to the top of the queue.
 

@@ -43,7 +43,10 @@ export const intakeLimiter = new SlidingWindowLimiter(Number(process.env.INTAKE_
 const cookieSecure = () => (process.env.COOKIE_SECURE ?? String(process.env.NODE_ENV === 'production')) === 'true';
 
 export function requireAuth(req: Request, res: Response, next: NextFunction) {
-  const user = sessions.get(parseCookies(req.headers.cookie)[SESSION_COOKIE]);
+  // The queue view polls for new cases. Those requests are marked as background so they
+  // don't reset the idle timer (a client that lies about this only shortens its own session).
+  const background = req.headers['x-background-poll'] === '1';
+  const user = sessions.get(parseCookies(req.headers.cookie)[SESSION_COOKIE], !background);
   if (!user) {
     return res.status(401).json({ success: false, error: 'Authentication required.' });
   }

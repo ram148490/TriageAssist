@@ -79,6 +79,19 @@ for (const bad of ['', 'ab', 'Alice', '-alice', 'a b c', 'a'.repeat(33), "alice'
   }
   assert.strictEqual(store.get(busy), null, 'absolute timeout');
 
+  // Background polling must not keep an unattended session alive.
+  const polled = store.create(user);
+  for (let i = 0; i < 5; i++) {
+    now += 10 * 60_000;
+    if (i < 2) assert.ok(store.get(polled, false), `background poll ${i + 1} within the idle window`);
+  }
+  assert.strictEqual(store.get(polled, false), null, 'polls with touch=false never extend the idle timer');
+  const active = store.create(user);
+  for (let i = 0; i < 5; i++) {
+    now += 10 * 60_000;
+    assert.ok(store.get(active, true), 'real activity does extend it');
+  }
+
   // Logout invalidates the token immediately.
   const t2 = store.create(user);
   store.destroy(t2);

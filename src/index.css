@@ -1,1 +1,22 @@
 @import "tailwindcss";
+
+/*
+ * One consistent, high-contrast keyboard focus indicator for every control (WCAG 2.4.7 / 2.4.11).
+ * sky-700 is 5.9:1 on white. Controls don't override it with `focus:outline-none`.
+ */
+:focus-visible {
+  outline: 3px solid var(--color-sky-700);
+  outline-offset: 2px;
+}
+
+/* Honour "reduce motion": no spinners or transitions. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

@@ -21,10 +21,10 @@ async function request<T>(path: string, init?: RequestInit, opts: { expectAuth?:
   let res: Response;
   try {
     res = await fetch(path, {
-      headers: { 'Content-Type': 'application/json' },
       credentials: 'same-origin',
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       ...init,
+      headers: { 'Content-Type': 'application/json', ...(init?.headers as Record<string, string> | undefined) },
     });
   } catch (err) {
     if (err instanceof DOMException && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
@@ -82,8 +82,14 @@ export function submitIntake(payload: CreateIntakeRequest) {
   });
 }
 
-export function fetchQueue() {
-  return request<{ success: true; submissions: IntakeSubmission[] }>('/api/queue');
+/**
+ * `background: true` marks an automatic poll. The server then does not count it as user
+ * activity, so polling can't keep an unattended workstation signed in past the idle timeout.
+ */
+export function fetchQueue(opts: { background?: boolean } = {}) {
+  return request<{ success: true; submissions: IntakeSubmission[] }>('/api/queue', {
+    headers: opts.background ? { 'X-Background-Poll': '1' } : undefined,
+  });
 }
 
 export function fetchSubmissionDetail(id: string) {
