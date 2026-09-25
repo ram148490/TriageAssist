@@ -94,8 +94,13 @@ depends on:
 - **Stored data.** Patient names and phone numbers are plaintext in Postgres and are kept until
   you delete them; there is no retention job. Encrypt the disk/database volume and define a
   retention policy.
-- **Not built:** password self-service/MFA, roles (all staff can override), per-user session
-  revocation without a restart, and audit-log tamper protection at the database level.
+- **Account management is CLI-only.** Creating, resetting and disabling accounts needs shell and
+  database access (`npm run create-user`); there is no in-app admin screen, no roles (every
+  signed-in user can confirm and override), no password change or "forgot password" flow, and a
+  disabled account's open session lasts until the server restarts. A natural next step is an
+  admin role with an in-app "Staff accounts" screen and forced password change at first sign-in.
+- **Not built:** MFA, roles, per-user session revocation without a restart, and audit-log tamper
+  protection at the database level.
 
 ## Data minimization
 
@@ -173,7 +178,10 @@ npm run migrate
 
 ### 4. Create a staff account
 
-Nobody can sign in until an account exists. The password is generated and shown **once**:
+Nobody can sign in until an account exists, and there is **deliberately no public signup**:
+this is a staff-only tool holding patient data, so anyone able to create their own account would
+defeat the authentication. Accounts are provisioned by an administrator on the server. The
+password is generated and shown **once**:
 
 ```bash
 npm run create-user -- alice            # create
