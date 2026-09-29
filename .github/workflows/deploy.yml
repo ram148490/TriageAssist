@@ -39,10 +39,14 @@ jobs:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
           set -euo pipefail
-          IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY:${{ github.sha }}"
-          docker build -t "$IMAGE" -t "$ECR_REGISTRY/$ECR_REPOSITORY:latest" .
+          # sha-runid (not a bare "latest" tag, and not sha alone): the ECR repo has
+          # IMMUTABLE tag mutability, so any tag already pushed can never be pushed
+          # again pointing at a different image - a bare "latest" would break on the
+          # very next deploy, and a bare sha would break on any manual re-run of an
+          # unchanged commit (e.g. retrying after an infra-only failure).
+          IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY:${{ github.sha }}-${{ github.run_id }}"
+          docker build -t "$IMAGE" .
           docker push "$IMAGE"
-          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
 
       - name: Deploy to ECS Express Mode
