@@ -1,0 +1,74 @@
+name: Deploy to ECS Express Mode
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: triageassist
+  ECS_CLUSTER: triageassist
+  ECS_SERVICE: triageassist
+  EXECUTION_ROLE_ARN: arn:aws:iam::215939711282:role/ecsTaskExecutionRole
+  INFRASTRUCTURE_ROLE_ARN: arn:aws:iam::215939711282:role/ecsInfrastructureRoleForExpressServices
+
+permissions:
+  id-token: write   # required to mint the OIDC token for AWS
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Configure AWS credentials (OIDC, no stored keys)
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: arn:aws:iam::215939711282:role/github-actions-triageassist-deploy
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        id: build
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          set -euo pipefail
+          IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY:${{ github.sha }}"
+          docker build -t "$IMAGE" -t "$ECR_REGISTRY/$ECR_REPOSITORY:latest" .
+          docker push "$IMAGE"
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy to ECS Express Mode
+        id: deploy
+        uses: aws-actions/amazon-ecs-deploy-express-service@v1
+        with:
+          service-name: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          image: ${{ steps.build.outputs.image }}
+          execution-role-arn: ${{ env.EXECUTION_ROLE_ARN }}
+          infrastructure-role-arn: ${{ env.INFRASTRUCTURE_ROLE_ARN }}
+          container-port: 3000
+          health-check-path: /api/health
+          cpu: 512
+          memory: 1024
+          log-group: /ecs/triageassist
+          log-stream-prefix: ecs
+          environment-variables: |
+            [
+              {"name": "NODE_ENV", "value": "production"},
+              {"name": "HOST", "value": "0.0.0.0"},
+              {"name": "DATABASE_SSL", "value": "true"},
+              {"name": "DATABASE_URL", "value": "${{ secrets.DATABASE_URL }}"},
+              {"name": "GEMINI_API_KEY", "value": "${{ secrets.GEMINI_API_KEY }}"},
+              {"name": "GEMINI_PAID_TIER_CONFIRMED", "value": "${{ secrets.GEMINI_PAID_TIER_CONFIRMED }}"}
+            ]
+
+      - name: Show live URL
+        run: echo "Deployed to ${{ steps.deploy.outputs.endpoint }}"
