@@ -15,7 +15,12 @@ RUN npm run build
 FROM node:20-alpine AS prod-deps
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+# --omit=optional: vite optionally depends on tsx (for loading TS config files),
+# which hard-depends on a different esbuild version than our own devDependency.
+# Under --omit=dev alone, npm still attempts that nested install and its
+# postinstall script collides with the other esbuild's platform binary — not
+# needed anyway since production never dynamically imports vite (see server/index.ts).
+RUN npm ci --omit=dev --omit=optional
 
 # --- Stage 4: minimal runtime image ---
 FROM node:20-alpine AS runtime
