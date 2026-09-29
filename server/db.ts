@@ -1,6 +1,8 @@
+import tls from 'tls';
 import { Pool } from 'pg';
 import { logError } from './lib/log';
 import { SCHEMA_SQL } from './schema';
+import { SUPABASE_ROOT_CA } from './lib/db-ca';
 
 const connectionString = process.env.DATABASE_URL;
 
@@ -11,8 +13,14 @@ if (!connectionString) {
 export const pool = new Pool({
   connectionString,
   // Set DATABASE_SSL=true for any database that isn't on this machine: patient names and phone
-  // numbers must not cross a network unencrypted.
-  ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: true } : undefined,
+  // numbers must not cross a network unencrypted. Node's default trusted-CA list doesn't include
+  // Supabase's self-signed pooler root, so it's added here alongside (not instead of) the default
+  // list - this keeps verification working against both Supabase and any standard-CA-signed host
+  // (e.g. RDS) without weakening rejectUnauthorized.
+  ssl:
+    process.env.DATABASE_SSL === 'true'
+      ? { rejectUnauthorized: true, ca: [...tls.rootCertificates, SUPABASE_ROOT_CA] }
+      : undefined,
   // Without these, an unreachable database makes every request wait forever.
   connectionTimeoutMillis: 5_000,
   statement_timeout: 10_000,
